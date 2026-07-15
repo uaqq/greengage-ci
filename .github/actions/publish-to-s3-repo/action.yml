@@ -1,23 +1,22 @@
-# .github/actions/publish-packages/action.yml
+# .github/actions/publish-to-s3-repo/action.yml
 
 name: Publish packages to S3 repository
 description: >
-  Downloads deb artifacts from a successful CI run for a given release tag
-  and publishes them to an S3-backed apt repository via repomanager.
+  Publishes already-downloaded package files from a local directory to an
+  S3-backed repository via repomanager. Shared by any action/workflow that
+  first obtains packages some other way (CI run artifact, release asset, ...).
 
 inputs:
-  source_repo:
-    description: 'Source GitHub repository (org/repo)'
+  packages_dir:
+    description: 'Local directory containing the package files to publish'
     required: true
-  release_tag:
-    description: 'Release tag'
-    required: true
-  ci_workflow:
-    description: 'Workflow name in the source repo (e.g. "Greengage CI")'
-    required: true
-  artifact_name:
-    description: 'Artifact name in the source repo workflow (e.g. "deb-packages")'
-    required: true
+  extensions:
+    description: >
+      Space-separated list of package file extensions to look for inside
+      packages_dir (e.g. 'deb ddeb'). Extend this once rpm publishing is
+      supported (e.g. 'deb ddeb rpm').
+    required: false
+    default: 'deb ddeb'
   s3_prefix:
     description: >
       Repository path prefix inside the S3 bucket
@@ -27,9 +26,6 @@ inputs:
     description: 'Repomanager container image'
     required: false
     default: 'ghcr.io/greengagedb/repomanager-ng-tool-x86_64:latest'
-  gh_token:
-    description: 'GitHub token to access the source repo'
-    required: true
   aws_bucket:
     description: 'S3 bucket name'
     required: true
@@ -59,10 +55,6 @@ inputs:
   ghcr_password:
     description: 'GitHub Container Registry token (PAT)'
     required: true
-  download_dir:
-    description: 'Local directory for downloaded packages'
-    required: false
-    default: 'downloaded-packages'
 
 outputs:
   published:
@@ -72,56 +64,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Download artifact from CI run for ${{ inputs.source_repo }} tag ${{ inputs.release_tag }}
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.gh_token }}
-      run: |
-        set -euo pipefail
-
-        SOURCE_REPO="${{ inputs.source_repo }}"
-        TAG="${{ inputs.release_tag }}"
-        WORKFLOW="${{ inputs.ci_workflow }}"
-
-        echo "=== Resolving tag $TAG in $SOURCE_REPO ==="
-
-        TAG_OBJECT=$(gh api "repos/${SOURCE_REPO}/git/ref/tags/${TAG}" --jq '.object')
-        TAG_TYPE=$(echo "$TAG_OBJECT" | jq -r '.type')
-        TAG_SHA=$(echo  "$TAG_OBJECT" | jq -r '.sha')
-
-        if [ "$TAG_TYPE" = "tag" ]; then
-          RELEASE_SHA=$(gh api "repos/${SOURCE_REPO}/git/tags/${TAG_SHA}" --jq '.object.sha')
-        else
-          RELEASE_SHA="$TAG_SHA"
-        fi
-
-        echo "Commit SHA for tag $TAG: $RELEASE_SHA"
-
-        RUN_ID=$(gh run list \
-          --repo "$SOURCE_REPO" \
-          --workflow "$WORKFLOW" \
-          --limit 100 \
-          --json databaseId,headSha,conclusion \
-          --jq '.[] | select(.headSha == "'"$RELEASE_SHA"'" and .conclusion == "success") | .databaseId' \
-          | head -1)
-
-        if [ -z "$RUN_ID" ]; then
-          echo "::error::No successful '$WORKFLOW' run found for commit $RELEASE_SHA (tag $TAG) in $SOURCE_REPO"
-          exit 1
-        fi
-        echo "Found CI run: $RUN_ID"
-        echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
-
-    - name: Download package artifacts
-      uses: actions/download-artifact@v7
-      with:
-        github-token: ${{ inputs.gh_token }}
-        repository: ${{ inputs.source_repo }}
-        run-id: ${{ env.RUN_ID }}
-        path: ${{ inputs.download_dir }}
-        pattern: ${{ inputs.artifact_name }}
-        merge-multiple: true
-
     - name: Check published state via aws s3 ls
       id: check
       shell: bash
@@ -130,26 +72,28 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         AWS_ENDPOINT_URL:      ${{ inputs.aws_endpoint_url }}
         S3_PACKAGES_URI:       's3://${{ inputs.aws_bucket }}/repositories/${{ inputs.s3_prefix }}/packages/'
+        PACKAGES_DIR:          ${{ inputs.packages_dir }}
+        EXTENSIONS:            ${{ inputs.extensions }}
       run: |
         set -euo pipefail
         shopt -s nullglob
-
-        DOWNLOAD_DIR="${{ inputs.download_dir }}"
 
         echo "Checking S3: $S3_PACKAGES_URI"
 
         ls_output=$(aws s3 ls "$S3_PACKAGES_URI" \
           ${AWS_ENDPOINT_URL:+--endpoint-url "$AWS_ENDPOINT_URL"} 2>/dev/null || true)
 
-        missing=()
-
-        files=("$DOWNLOAD_DIR"/*.deb "$DOWNLOAD_DIR"/*.ddeb)
+        files=()
+        for ext in $EXTENSIONS; do
+          files+=("$PACKAGES_DIR"/*."$ext")
+        done
 
         if [ ${#files[@]} -eq 0 ]; then
-          echo "::error::No .deb/.ddeb files found in $DOWNLOAD_DIR"
+          echo "::error::No files matching extensions [$EXTENSIONS] found in $PACKAGES_DIR"
           exit 1
         fi
 
+        missing=()
         for package in "${files[@]}"; do
           filename=$(basename "$package")
           if echo "$ls_output" | awk '{print $NF}' | grep -qFx "$filename"; then
@@ -201,11 +145,11 @@ runs:
         APT_COMPONENT:         ${{ inputs.apt_component }}
         STORAGE_TYPE:          s3
         S3_PREFIX:             repositories/${{ inputs.s3_prefix }}
+        PACKAGES_DIR:          ${{ inputs.packages_dir }}
+        EXTENSIONS:            ${{ inputs.extensions }}
       run: |
         set -euo pipefail
         shopt -s nullglob
-
-        DOWNLOAD_DIR="${{ inputs.download_dir }}"
 
         export AWS_CONFIG_FILE=$(pwd)/aws-config
         cat > "$AWS_CONFIG_FILE" << 'EOF'
@@ -235,10 +179,13 @@ runs:
           -e GNUPGHOME \
           ${{ inputs.repomanager_image }}"
 
-        files=("$DOWNLOAD_DIR"/*.deb "$DOWNLOAD_DIR"/*.ddeb)
+        files=()
+        for ext in $EXTENSIONS; do
+          files+=("$PACKAGES_DIR"/*."$ext")
+        done
 
         if [ ${#files[@]} -eq 0 ]; then
-          echo "::error::No .deb/.ddeb files found in $DOWNLOAD_DIR"
+          echo "::error::No files matching extensions [$EXTENSIONS] found in $PACKAGES_DIR"
           exit 1
         fi
 

@@ -1,66 +1,168 @@
 # .github/workflows/sync-packages.yml
-
 name: Sync release packages to S3 repository
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  # Manual run example:
+  # gh workflow run greengage-sync-packages.yml --repo GreengageDB/greengage-ci --ref CI-5846 --field source_repo=magf/pxf
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Source repository'
+        required: true
+        type: choice
+        options:
+          - GreengageDB/greengage
+          - GreengageDB/pxf
+          - GreengageDB/gpbackup
+          - magf/greengage
+          - magf/pxf
+          - magf/gpbackup
+
+  # schedule:
+  #   - cron: '* 0 * * *'
 
 concurrency:
   group: sync-packages
   cancel-in-progress: false
 
+env:
+  # Package extensions this workflow knows how to place into the S3 repository.
+  # Extend with 'rpm' once the rpm repository layout/naming convention is decided.
+  PACKAGE_EXTENSIONS: 'deb ddeb'
+  RELEASES_LIMIT: 3
+
 jobs:
-  publish:
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - source_repo:   GreengageDB/greengage
-            ci_workflow:   'Greengage CI'
-            artifact_name: 'deb-packages-ubuntu22.04'
-            s3_prefix:     'ubuntu/22.04/x86_64'
-          - source_repo:   GreengageDB/greengage
-            ci_workflow:   'Greengage CI'
-            artifact_name: 'deb-packages-ubuntu24.04'
-            s3_prefix:     'ubuntu/24.04/x86_64'
-          - source_repo:   GreengageDB/pxf
-            ci_workflow:   'Greengage PXF CI'
-            artifact_name: 'deb-packages-pxf6-*'
-            s3_prefix:     'ubuntu/22.04/x86_64'
-          - source_repo:   GreengageDB/pxf
-            ci_workflow:   'Greengage PXF CI'
-            artifact_name: 'deb-packages-pxf7-*'
-            s3_prefix:     'ubuntu/22.04/x86_64'
-          - source_repo:   GreengageDB/gpbackup
-            ci_workflow:   'Build deb'
-            artifact_name: 'gpbackup-deb-ubuntu22.04'
-            s3_prefix:     'ubuntu/22.04/x86_64'
-          - source_repo:   GreengageDB/gpbackup
-            ci_workflow:   'Build deb'
-            artifact_name: 'gpbackup-deb-ubuntu24.04'
-            s3_prefix:     'ubuntu/24.04/x86_64'
-
+  collect-releases:
+    name: Collect ${{ inputs.source_repo }} releases
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.scan.outputs.matrix }}
     steps:
-      - name: Get latest release tag
-        id: tag
-        uses: GreengageDB/greengage-ci/.github/actions/get-latest-release-tag@v37
-        with:
-          source_repo: ${{ matrix.source_repo }}
-          gh_token: ${{ github.token }}
+      # Every release asset is expected to end in "<sep><os><os_version>_<arch>.<ext>", where
+      # <sep> is a single non-alphanumeric separator (e.g. "~" as used by
+      # .github/actions/upload-pkgs-to-release, or "." as used by other build pipelines):
+      #   greengage-db_7.0.0~ubuntu22.04_amd64.deb
+      #   gpbackup-s3-plugin_1.2.3.ubuntu22.04_amd64.deb
+      # A single release can carry packages for several OS/arch combinations at once, so we
+      # scan the last RELEASES_LIMIT releases, extract every distinct (tag, s3_prefix) target
+      # from the matching asset names, and hand that list to the publish job as a matrix.
+      - name: Scan ${{ inputs.source_repo }} releases for ${{ env.PACKAGE_EXTENSIONS }} packages
+        id: scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPO: ${{ inputs.source_repo }}
+        run: |
+          set -euo pipefail
 
-      - name: Publish ${{ matrix.source_repo }} ${{ steps.tag.outputs.tag }}
-        if: steps.tag.outputs.tag != ''
-        uses: GreengageDB/greengage-ci/.github/actions/publish-packages@v48
+          tags=$(gh release list \
+            --repo "$SOURCE_REPO" \
+            --limit "$RELEASES_LIMIT" \
+            --json tagName \
+            --jq '.[].tagName')
+
+          echo "Tags: $(echo "$tags" | tr '\n' ' ')"
+
+          combos='[]'
+          declare -A seen
+
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+
+            assets=$(gh release view "$tag" \
+              --repo "$SOURCE_REPO" \
+              --json assets \
+              --jq '.assets[].name')
+
+            while IFS= read -r name; do
+              [ -z "$name" ] && continue
+
+              ext="${name##*.}"
+              case " $PACKAGE_EXTENSIONS " in
+                *" $ext "*) ;;
+                *) continue ;;
+              esac
+
+              base="${name%.*}"
+
+              if [[ "$base" =~ [^a-z0-9]([a-z]+)([0-9]+\.[0-9]+)_([a-z0-9]+)$ ]]; then
+                os_name="${BASH_REMATCH[1]}"
+                os_version="${BASH_REMATCH[2]}"
+                arch="${BASH_REMATCH[3]}"
+              else
+                echo "::warning::Skipping '$name' in $tag: filename doesn't end in '<sep><os><version>_<arch>.$ext'"
+                continue
+              fi
+
+              # Only amd64 is published for now; extend once other archs are needed.
+              if [ "$arch" != "amd64" ]; then
+                echo "::notice::Skipping '$name' in $tag: only amd64 packages are published for now"
+                continue
+              fi
+              s3_arch="x86_64"
+
+              s3_prefix="${os_name}/${os_version}/${s3_arch}"
+              # Leading "*" absorbs whatever separator precedes <os><version> (e.g. "~" or ".").
+              asset_pattern="*${os_name}${os_version}_${arch}"
+
+              key="${tag}|${s3_prefix}"
+              if [ -z "${seen[$key]:-}" ]; then
+                seen[$key]=1
+                combos=$(jq -c \
+                  --arg tag "$tag" \
+                  --arg s3_prefix "$s3_prefix" \
+                  --arg asset_pattern "$asset_pattern" \
+                  '. + [{"tag":$tag,"s3_prefix":$s3_prefix,"asset_pattern":$asset_pattern}]' \
+                  <<< "$combos")
+              fi
+            done <<< "$assets"
+          done <<< "$tags"
+
+          echo "Publish targets: $combos"
+          echo "matrix={\"include\":$combos}" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish ${{ inputs.source_repo }} ${{ matrix.tag }} (${{ matrix.s3_prefix }})
+    needs: collect-releases
+    if: needs.collect-releases.outputs.matrix != '{"include":[]}'
+    strategy:
+      matrix: ${{ fromJson(needs.collect-releases.outputs.matrix) }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download ${{ matrix.tag }} packages for ${{ matrix.s3_prefix }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPO: ${{ inputs.source_repo }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloaded-packages
+
+          found=false
+          for ext in $PACKAGE_EXTENSIONS; do
+            if gh release download "${{ matrix.tag }}" \
+                 --repo "$SOURCE_REPO" \
+                 --pattern "${{ matrix.asset_pattern }}.$ext" \
+                 --dir downloaded-packages 2>/dev/null; then
+              found=true
+            fi
+          done
+
+          if [ "$found" != true ]; then
+            echo "::error::No packages downloaded for ${{ matrix.tag }} / ${{ matrix.s3_prefix }}"
+            exit 1
+          fi
+
+          find downloaded-packages -type f
+
+      - name: Publish to S3 repository
+        uses: ./.github/actions/publish-to-s3-repo
         with:
-          source_repo:           ${{ matrix.source_repo }}
-          release_tag:           ${{ steps.tag.outputs.tag }}
-          ci_workflow:           ${{ matrix.ci_workflow }}
-          artifact_name:         ${{ matrix.artifact_name }}
+          packages_dir:          downloaded-packages
+          extensions:            ${{ env.PACKAGE_EXTENSIONS }}
           s3_prefix:             ${{ matrix.s3_prefix }}
-          gh_token:              ${{ github.token }}
           aws_bucket:            ${{ secrets.BUCKET }}
           aws_endpoint_url:      ${{ secrets.AWS_ENDPOINT_URL }}
           aws_access_key_id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
