@@ -12,12 +12,11 @@ on:
         type: choice
         options:
           - GreengageDB/greengage
-          - GreengageDB/pxf
-          - GreengageDB/gpbackup
-          - magf/greengage
-          - magf/pxf
-          - magf/gpbackup
-
+          - uaqq/pxf
+          - uaqq/gpbackup
+          - uaqq/gpbackup-s3-plugin
+          - uaqq/madlib
+          - uaqq/diskquota
   # schedule:
   #   - cron: '* 0 * * *'
 
