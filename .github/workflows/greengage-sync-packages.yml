@@ -133,6 +133,19 @@ jobs:
               <<< "$combos")
           done
 
+          # Publish targets carry the exact matched filenames (not a rebuilt wildcard)
+          # so the download step can't accidentally sweep in an unrelated asset that
+          # happens to share the same <os><version>_<arch> suffix.
+          combos='[]'
+          for key in "${key_order[@]}"; do
+            combos=$(jq -c \
+              --arg tag "${tag_by_key[$key]}" \
+              --arg s3_prefix "${prefix_by_key[$key]}" \
+              --arg files "${files_by_key[$key]}" \
+              '. + [{"tag":$tag,"s3_prefix":$s3_prefix,"files":$files}]' \
+              <<< "$combos")
+          done
+
           echo "Publish targets: $combos"
           echo "matrix={\"include\":$combos}" >> "$GITHUB_OUTPUT"
 
