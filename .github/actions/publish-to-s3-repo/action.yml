@@ -58,8 +58,8 @@ inputs:
 
 outputs:
   published:
-    description: '"true" if packages were published, "false" if not published'
-    value: ${{ steps.result.outputs.published }}
+    description: '"true" if packages were published, "false" if they were already up to date'
+    value: ${{ steps.check.outputs.already_published == 'true' && 'false' || steps.publish.outputs.published }}
 
 runs:
   using: composite
@@ -92,6 +92,12 @@ runs:
           echo "::error::No files matching extensions [$EXTENSIONS] found in $PACKAGES_DIR"
           exit 1
         fi
+
+        {
+          echo "files<<PKG_FILES_EOF"
+          printf '%s\n' "${files[@]}"
+          echo "PKG_FILES_EOF"
+        } >> "$GITHUB_OUTPUT"
 
         missing=()
         for package in "${files[@]}"; do
@@ -145,11 +151,9 @@ runs:
         APT_COMPONENT:         ${{ inputs.apt_component }}
         STORAGE_TYPE:          s3
         S3_PREFIX:             repositories/${{ inputs.s3_prefix }}
-        PACKAGES_DIR:          ${{ inputs.packages_dir }}
-        EXTENSIONS:            ${{ inputs.extensions }}
+        FILES:                 ${{ steps.check.outputs.files }}
       run: |
         set -euo pipefail
-        shopt -s nullglob
 
         export AWS_CONFIG_FILE=$(pwd)/aws-config
         cat > "$AWS_CONFIG_FILE" << 'EOF'
@@ -179,22 +183,13 @@ runs:
           -e GNUPGHOME \
           ${{ inputs.repomanager_image }}"
 
-        files=()
-        for ext in $EXTENSIONS; do
-          files+=("$PACKAGES_DIR"/*."$ext")
-        done
-
-        if [ ${#files[@]} -eq 0 ]; then
-          echo "::error::No files matching extensions [$EXTENSIONS] found in $PACKAGES_DIR"
-          exit 1
-        fi
-
         failed=()
-        for file in "${files[@]}"; do
+        while IFS= read -r file; do
+          [ -z "$file" ] && continue
           filename=$(basename "$file")
           echo "Publishing: $filename -> $S3_PREFIX"
           $REPOMANAGER add "$S3_PREFIX" "/data/$file" || failed+=("$filename")
-        done
+        done <<< "$FILES"
 
         if [ ${#failed[@]} -gt 0 ]; then
           echo "::error::Failed to publish: ${failed[*]}"
@@ -203,13 +198,3 @@ runs:
 
         echo "All packages published successfully"
         echo "published=true" >> $GITHUB_OUTPUT
-
-    - name: Set published output
-      id: result
-      shell: bash
-      run: |
-        if [ "${{ steps.check.outputs.already_published }}" = "true" ]; then
-          echo "published=false" >> $GITHUB_OUTPUT
-        else
-          echo "published=true" >> $GITHUB_OUTPUT
-        fi

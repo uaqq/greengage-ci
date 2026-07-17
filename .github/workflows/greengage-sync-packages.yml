@@ -2,37 +2,30 @@
 name: Sync release packages to S3 repository
 
 on:
-  # Manual run example:
-  # gh workflow run greengage-sync-packages.yml --repo GreengageDB/greengage-ci --ref CI-5846 --field source_repo=magf/pxf
   workflow_dispatch:
-    inputs:
-      source_repo:
-        description: 'Source repository'
-        required: true
-        type: choice
-        options:
-          - GreengageDB/greengage
-          - uaqq/pxf
-          - uaqq/gpbackup
-          - uaqq/gpbackup-s3-plugin
-          - uaqq/madlib
-          - uaqq/diskquota
-  # schedule:
-  #   - cron: '* 0 * * *'
+  schedule:
+    - cron: '*/15 * * * *'
 
 concurrency:
   group: sync-packages
   cancel-in-progress: false
 
 env:
-  # Package extensions this workflow knows how to place into the S3 repository.
-  # Extend with 'rpm' once the rpm repository layout/naming convention is decided.
   PACKAGE_EXTENSIONS: 'deb ddeb'
   RELEASES_LIMIT: 3
+  SOURCE_REPOS: |-
+    [
+      "GreengageDB/greengage",
+      "uaqq/pxf",
+      "uaqq/gpbackup",
+      "uaqq/gpbackup-s3-plugin",
+      "uaqq/madlib",
+      "uaqq/diskquota"
+    ]
 
 jobs:
   collect-releases:
-    name: Collect ${{ inputs.source_repo }} releases
+    name: Collect releases
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.scan.outputs.matrix }}
@@ -43,89 +36,114 @@ jobs:
       #   greengage-db_7.0.0~ubuntu22.04_amd64.deb
       #   gpbackup-s3-plugin_1.2.3.ubuntu22.04_amd64.deb
       # A single release can carry packages for several OS/arch combinations at once, so we
-      # scan the last RELEASES_LIMIT releases, extract every distinct (tag, s3_prefix) target
-      # from the matching asset names, and hand that list to the publish job as a matrix.
-      - name: Scan ${{ inputs.source_repo }} releases for ${{ env.PACKAGE_EXTENSIONS }} packages
+      # scan the last RELEASES_LIMIT releases of every repo in SOURCE_REPOS, extract every
+      # distinct (source_repo, tag, s3_prefix) target from the matching asset names, and hand
+      # that list to the publish job as a matrix.
+      - name: Scan SOURCE_REPOS releases for ${{ env.PACKAGE_EXTENSIONS }} packages
         id: scan
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_REPO: ${{ inputs.source_repo }}
         run: |
           set -euo pipefail
 
-          tags=$(gh release list \
-            --repo "$SOURCE_REPO" \
-            --limit "$RELEASES_LIMIT" \
-            --json tagName \
-            --jq '.[].tagName')
-
-          echo "Tags: $(echo "$tags" | tr '\n' ' ')"
-
-          combos='[]'
           declare -A seen
+          declare -A tag_by_key
+          declare -A prefix_by_key
+          declare -A repo_by_key
+          declare -A files_by_key
+          key_order=()
 
-          while IFS= read -r tag; do
-            [ -z "$tag" ] && continue
+          repos=$(jq -r '.[]' <<< "$SOURCE_REPOS")
 
-            assets=$(gh release view "$tag" \
-              --repo "$SOURCE_REPO" \
-              --json assets \
-              --jq '.assets[].name')
+          while IFS= read -r source_repo; do
+            [ -z "$source_repo" ] && continue
 
-            while IFS= read -r name; do
-              [ -z "$name" ] && continue
+            tags=$(gh release list \
+              --exclude-drafts \
+              --exclude-pre-releases \
+              --repo "$source_repo" \
+              --limit "$RELEASES_LIMIT" \
+              --json tagName \
+              --jq '.[].tagName')
 
-              ext="${name##*.}"
-              case " $PACKAGE_EXTENSIONS " in
-                *" $ext "*) ;;
-                *) continue ;;
-              esac
+            echo "Tags for $source_repo: $(echo "$tags" | tr '\n' ' ')"
 
-              base="${name%.*}"
+            while IFS= read -r tag; do
+              [ -z "$tag" ] && continue
 
-              if [[ "$base" =~ [^a-z0-9]([a-z]+)([0-9]+\.[0-9]+)_([a-z0-9]+)$ ]]; then
-                os_name="${BASH_REMATCH[1]}"
-                os_version="${BASH_REMATCH[2]}"
-                arch="${BASH_REMATCH[3]}"
-              else
-                echo "::warning::Skipping '$name' in $tag: filename doesn't end in '<sep><os><version>_<arch>.$ext'"
-                continue
-              fi
+              assets=$(gh release view "$tag" \
+                --repo "$source_repo" \
+                --json assets \
+                --jq '.assets[].name')
 
-              # Only amd64 is published for now; extend once other archs are needed.
-              if [ "$arch" != "amd64" ]; then
-                echo "::notice::Skipping '$name' in $tag: only amd64 packages are published for now"
-                continue
-              fi
-              s3_arch="x86_64"
+              while IFS= read -r name; do
+                [ -z "$name" ] && continue
 
-              s3_prefix="${os_name}/${os_version}/${s3_arch}"
-              # Leading "*" absorbs whatever separator precedes <os><version> (e.g. "~" or ".").
-              asset_pattern="*${os_name}${os_version}_${arch}"
+                ext="${name##*.}"
+                case " $PACKAGE_EXTENSIONS " in
+                  *" $ext "*) ;;
+                  *) continue ;;
+                esac
 
-              key="${tag}|${s3_prefix}"
-              if [ -z "${seen[$key]:-}" ]; then
-                seen[$key]=1
-                combos=$(jq -c \
-                  --arg tag "$tag" \
-                  --arg s3_prefix "$s3_prefix" \
-                  --arg asset_pattern "$asset_pattern" \
-                  '. + [{"tag":$tag,"s3_prefix":$s3_prefix,"asset_pattern":$asset_pattern}]' \
-                  <<< "$combos")
-              fi
-            done <<< "$assets"
-          done <<< "$tags"
+                base="${name%.*}"
+
+                if [[ "$base" =~ [^a-z0-9]([a-z]+)([0-9]+\.[0-9]+)_([a-z0-9]+)$ ]]; then
+                  os_name="${BASH_REMATCH[1]}"
+                  os_version="${BASH_REMATCH[2]}"
+                  arch="${BASH_REMATCH[3]}"
+                else
+                  echo "::warning::Skipping '$name' in $source_repo $tag: filename doesn't end in '<sep><os><version>_<arch>.$ext'"
+                  continue
+                fi
+
+                if [ "$arch" != "amd64" ]; then
+                  echo "::notice::Skipping '$name' in $source_repo $tag: only amd64 packages are published for now"
+                  continue
+                fi
+                s3_arch="x86_64"
+
+                s3_prefix="${os_name}/${os_version}/${s3_arch}"
+
+                key="${source_repo}|${tag}|${s3_prefix}"
+                if [ -z "${seen[$key]:-}" ]; then
+                  seen[$key]=1
+                  key_order+=("$key")
+                  tag_by_key[$key]="$tag"
+                  prefix_by_key[$key]="$s3_prefix"
+                  repo_by_key[$key]="$source_repo"
+                  files_by_key[$key]="$name"
+                else
+                  files_by_key[$key]="${files_by_key[$key]} $name"
+                fi
+              done <<< "$assets"
+            done <<< "$tags"
+          done <<< "$repos"
+
+          # Publish targets carry the exact matched filenames (not a rebuilt wildcard)
+          # so the download step can't accidentally sweep in an unrelated asset that
+          # happens to share the same <os><version>_<arch> suffix.
+          combos='[]'
+          for key in "${key_order[@]}"; do
+            combos=$(jq -c \
+              --arg source_repo "${repo_by_key[$key]}" \
+              --arg tag "${tag_by_key[$key]}" \
+              --arg s3_prefix "${prefix_by_key[$key]}" \
+              --arg files "${files_by_key[$key]}" \
+              '. + [{"source_repo":$source_repo,"tag":$tag,"s3_prefix":$s3_prefix,"files":$files}]' \
+              <<< "$combos")
+          done
 
           echo "Publish targets: $combos"
           echo "matrix={\"include\":$combos}" >> "$GITHUB_OUTPUT"
 
   publish:
-    name: Publish ${{ inputs.source_repo }} ${{ matrix.tag }} (${{ matrix.s3_prefix }})
+    name: Publish ${{ matrix.source_repo }} ${{ matrix.tag }} (${{ matrix.s3_prefix }})
     needs: collect-releases
     if: needs.collect-releases.outputs.matrix != '{"include":[]}'
     strategy:
       matrix: ${{ fromJson(needs.collect-releases.outputs.matrix) }}
       fail-fast: false
+      max-parallel: 1
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -134,30 +152,36 @@ jobs:
       - name: Download ${{ matrix.tag }} packages for ${{ matrix.s3_prefix }}
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_REPO: ${{ inputs.source_repo }}
+          SOURCE_REPO: ${{ matrix.source_repo }}
+          TAG: ${{ matrix.tag }}
+          S3_PREFIX: ${{ matrix.s3_prefix }}
+          FILES: ${{ matrix.files }}
         run: |
           set -euo pipefail
           mkdir -p downloaded-packages
 
-          found=false
-          for ext in $PACKAGE_EXTENSIONS; do
-            if gh release download "${{ matrix.tag }}" \
-                 --repo "$SOURCE_REPO" \
-                 --pattern "${{ matrix.asset_pattern }}.$ext" \
-                 --dir downloaded-packages 2>/dev/null; then
-              found=true
-            fi
+          # $FILES is the exact, space-separated list of asset names identified by the
+          # scan step - download those specifically rather than re-matching a wildcard,
+          # so an unrelated asset can't be swept in by a coincidentally matching suffix.
+          pattern_args=()
+          for f in $FILES; do
+            pattern_args+=(--pattern "$f")
           done
 
-          if [ "$found" != true ]; then
-            echo "::error::No packages downloaded for ${{ matrix.tag }} / ${{ matrix.s3_prefix }}"
+          download_err=$(mktemp)
+          if ! gh release download "$TAG" \
+                 --repo "$SOURCE_REPO" \
+                 "${pattern_args[@]}" \
+                 --dir downloaded-packages 2>"$download_err"; then
+            echo "::error::gh release download failed for $TAG / $S3_PREFIX"
+            cat "$download_err" >&2
             exit 1
           fi
 
           find downloaded-packages -type f
 
       - name: Publish to S3 repository
-        uses: ./.github/actions/publish-to-s3-repo
+        uses: greengagedb/greengage-ci/.github/actions/publish-to-s3-repo@CI-5846
         with:
           packages_dir:          downloaded-packages
           extensions:            ${{ env.PACKAGE_EXTENSIONS }}
