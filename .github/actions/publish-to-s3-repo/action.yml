@@ -59,7 +59,7 @@ inputs:
 outputs:
   published:
     description: '"true" if packages were published, "false" if they were already up to date'
-    value: ${{ steps.check.outputs.already_published == 'true' && 'false' || steps.publish.outputs.published }}
+    value: ${{ steps.check.outputs.already_published == 'true' && 'false' || steps.rebuild.outputs.published }}
 
 runs:
   using: composite
@@ -163,6 +163,7 @@ runs:
         request_checksum_calculation = when_required
         response_checksum_validation = when_required
         EOF
+        echo "AWS_CONFIG_FILE=$AWS_CONFIG_FILE" >> "$GITHUB_ENV"
 
         echo "${{ inputs.ghcr_password }}" \
           | docker login ghcr.io -u ${{ inputs.ghcr_login }} --password-stdin
@@ -196,4 +197,43 @@ runs:
         fi
 
         echo "All packages published successfully"
+
+    - name: Rebuild repository metadata
+      id: rebuild
+      if: steps.check.outputs.already_published != 'true'
+      shell: bash
+      env:
+        AWS_BUCKET:            ${{ inputs.aws_bucket }}
+        AWS_ENDPOINT_URL:      ${{ inputs.aws_endpoint_url }}
+        AWS_ACCESS_KEY_ID:     ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+        APT_CODENAME:          ${{ inputs.apt_codename }}
+        APT_COMPONENT:         ${{ inputs.apt_component }}
+        STORAGE_TYPE:          s3
+        S3_PREFIX:             repositories/${{ inputs.s3_prefix }}
+      run: |
+        set -euo pipefail
+
+        REPOMANAGER="docker run --rm \
+          -u $(id -u):$(id -g) \
+          -v $(pwd):/data \
+          -v "${GNUPGHOME}":"${GNUPGHOME}" \
+          -v ${AWS_CONFIG_FILE}:/etc/aws-config \
+          -e AWS_CONFIG_FILE=/etc/aws-config \
+          -e AWS_BUCKET \
+          -e AWS_ENDPOINT_URL \
+          -e AWS_ACCESS_KEY_ID \
+          -e AWS_SECRET_ACCESS_KEY \
+          -e APT_CODENAME \
+          -e APT_COMPONENT \
+          -e STORAGE_TYPE \
+          -e GNUPGHOME \
+          ${{ inputs.repomanager_image }}"
+
+        if ! $REPOMANAGER rebuild "$S3_PREFIX"; then
+          echo "::error::Failed to rebuild $S3_PREFIX repository metadata"
+          exit 1
+        fi
+
+        echo "Repository metadata rebuilt successfully"
         echo "published=true" >> $GITHUB_OUTPUT
