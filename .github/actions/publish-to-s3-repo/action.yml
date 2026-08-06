@@ -83,24 +83,24 @@ runs:
         ls_output=$(aws s3 ls "$S3_PACKAGES_URI" \
           ${AWS_ENDPOINT_URL:+--endpoint-url "$AWS_ENDPOINT_URL"} 2>/dev/null || true)
 
-        files=()
+        packages=()
         for ext in $EXTENSIONS; do
-          files+=("$PACKAGES_DIR"/*."$ext")
+          packages+=("$PACKAGES_DIR"/*."$ext")
         done
 
-        if [ ${#files[@]} -eq 0 ]; then
+        if [ ${#packages[@]} -eq 0 ]; then
           echo "::error::No files matching extensions [$EXTENSIONS] found in $PACKAGES_DIR"
           exit 1
         fi
 
         {
-          echo "files<<PKG_FILES_EOF"
-          printf '%s\n' "${files[@]}"
+          echo "packages<<PKG_FILES_EOF"
+          printf '%s\n' "${packages[@]}"
           echo "PKG_FILES_EOF"
         } >> "$GITHUB_OUTPUT"
 
         missing=()
-        for package in "${files[@]}"; do
+        for package in "${packages[@]}"; do
           filename=$(basename "$package")
           if echo "$ls_output" | awk '{print $NF}' | grep -qFx "$filename"; then
             echo "already in S3: $filename"
@@ -151,7 +151,7 @@ runs:
         APT_COMPONENT:         ${{ inputs.apt_component }}
         STORAGE_TYPE:          s3
         S3_PREFIX:             repositories/${{ inputs.s3_prefix }}
-        FILES:                 ${{ steps.check.outputs.files }}
+        PACKAGES:              ${{ steps.check.outputs.packages }}
       run: |
         set -euo pipefail
 
@@ -183,16 +183,15 @@ runs:
           -e GNUPGHOME \
           ${{ inputs.repomanager_image }}"
 
-        failed=()
-        while IFS= read -r file; do
-          [ -z "$file" ] && continue
-          filename=$(basename "$file")
-          echo "Publishing: $filename -> $S3_PREFIX"
-          $REPOMANAGER add "$S3_PREFIX" "/data/$file" || failed+=("$filename")
-        done <<< "$FILES"
+        packages=()
+        while IFS= read -r package; do
+          [ -z "$package" ] && continue
+          echo "Publishing: $(basename "$package") -> $S3_PREFIX"
+          packages+=("/data/$package")
+        done <<< "$PACKAGES"
 
-        if [ ${#failed[@]} -gt 0 ]; then
-          echo "::error::Failed to publish: ${failed[*]}"
+        if ! $REPOMANAGER add "$S3_PREFIX" "${packages[@]}"; then
+          echo "::error::Failed to publish: ${packages[*]}"
           exit 1
         fi
 
