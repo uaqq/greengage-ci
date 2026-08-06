@@ -195,5 +195,10 @@ runs:
           exit 1
         fi
 
+        if ! $REPOMANAGER rebuild "$S3_PREFIX"; then
+          echo "::error::Failed to rebuild $S3_PREFIX repository metadata"
+          exit 1
+        fi
+
         echo "All packages published successfully"
         echo "published=true" >> $GITHUB_OUTPUT
