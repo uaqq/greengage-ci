@@ -90,3 +90,6 @@ Name        | Description
 1. Checks if the packages in `packages_dir` already exist in the repository.
 2. Imports the GPG private key for repository signing.
 3. Uploads the missing packages to the repository using the repomanager tool.
+4. Rebuilds the repository metadata (as a separate step, so its result is visible on its own in the GitHub UI).
+
+Steps 3 and 4 are skipped when all packages are already published.
