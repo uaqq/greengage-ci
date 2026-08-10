@@ -3,6 +3,11 @@ name: Sync release packages to S3 repository
 
 on:
   workflow_dispatch:
+    inputs:
+      force_test_install:
+        description: 'Test-install already-published packages too (ignore the "just published" gate)'
+        type: boolean
+        default: false
   schedule:
     - cron: '*/15 * * * *'
 
@@ -13,6 +18,12 @@ concurrency:
 env:
   PACKAGE_EXTENSIONS: 'deb ddeb'
   RELEASES_LIMIT: 3
+  GREENGAGE_REPO_URL: 'https://greengagedb.org'
+  GREENGAGE_VERSIONS_BY_OS: |-
+    {
+      "ubuntu/22.04": "6 7",
+      "ubuntu/24.04": "6"
+    }
   SOURCE_REPOS: |-
     [
       "GreengageDB/greengage",
@@ -26,7 +37,7 @@ env:
 jobs:
   collect-releases:
     name: Collect releases
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.scan.outputs.matrix }}
     steps:
@@ -144,7 +155,7 @@ jobs:
       matrix: ${{ fromJson(needs.collect-releases.outputs.matrix) }}
       fail-fast: false
       max-parallel: 1
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -181,7 +192,8 @@ jobs:
           find downloaded-packages -type f
 
       - name: Publish to S3 repository
-        uses: greengagedb/greengage-ci/.github/actions/publish-to-s3-repo@v52
+        id: publish
+        uses: greengagedb/greengage-ci/.github/actions/publish-to-s3-repo@CI-6109
         with:
           packages_dir:          downloaded-packages
           extensions:            ${{ env.PACKAGE_EXTENSIONS }}
@@ -193,3 +205,60 @@ jobs:
           ghcr_login:            ${{ secrets.GHCR_LOGIN }}
           ghcr_password:         ${{ secrets.GHCR_PASSWORD }}
           gpg_private_key:       ${{ secrets.GPG_PRIVATE_KEY }}
+
+      - name: Test package installation from repository
+        if: steps.publish.outputs.published == 'true' || inputs.force_test_install
+        env:
+          S3_PREFIX: ${{ matrix.s3_prefix }}
+          FILES: ${{ matrix.files }}
+          GREENGAGE_REPO_URL: ${{ env.GREENGAGE_REPO_URL }}
+        run: |
+          set -euo pipefail
+
+          IFS='/' read -r os_name os_version _ <<< "$S3_PREFIX"
+
+          greengage_versions=$(jq -r --arg os "${os_name}/${os_version}" '.[$os] // empty' <<< "$GREENGAGE_VERSIONS_BY_OS")
+          if [ -z "$greengage_versions" ]; then
+            echo "::notice::Skipping install test for '${S3_PREFIX}': no greengage version mapped to this OS"
+            exit 0
+          fi
+
+          packages=()
+          for f in $FILES; do
+            case "$f" in
+              *.deb) packages+=("$(dpkg-deb -f "downloaded-packages/$f" Package)") ;;
+            esac
+          done
+
+          if [ ${#packages[@]} -eq 0 ]; then
+            echo "::notice::No .deb packages to install-test for '${S3_PREFIX}'"
+            exit 0
+          fi
+
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL "${GREENGAGE_REPO_URL}/repositories/gpg" | \
+            sudo gpg --batch --no-tty --dearmor -o /etc/apt/keyrings/greengagedb.gpg
+
+          for version in $greengage_versions; do
+            echo "Testing install of: greengage${version} ${packages[*]} (from ${GREENGAGE_REPO_URL}, ubuntu:${os_version})"
+
+            docker run --rm \
+              -v /etc/apt/keyrings/greengagedb.gpg:/etc/apt/keyrings/greengagedb.gpg:ro \
+              -e GREENGAGE_REPO_URL \
+              -e OS_VERSION="$os_version" \
+              -e GREENGAGE_VERSION="$version" \
+              -e PACKAGES="${packages[*]}" \
+              "ubuntu:${os_version}" /bin/bash -c '
+                set -eux
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -o Acquire::https::Verify-Peer=false -q
+                apt-get install -y ca-certificates
+
+                echo "deb [signed-by=/etc/apt/keyrings/greengagedb.gpg] ${GREENGAGE_REPO_URL}/repositories/ubuntu/${OS_VERSION}/x86_64 greengagedb main" \
+                  > /etc/apt/sources.list.d/greengagedb.list
+
+                apt-get update -q
+                apt-get install -y "greengage${GREENGAGE_VERSION}" $PACKAGES
+                dpkg -l "greengage${GREENGAGE_VERSION}" $PACKAGES
+              '
+          done
