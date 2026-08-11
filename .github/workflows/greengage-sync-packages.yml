@@ -286,10 +286,12 @@ jobs:
 
           for v in 6 7; do
             pkgs=(${for_gp[$v]:-})
+            seed=()
             if [ "$generic_needs_gp" = true ]; then
               pkgs+=("${generic[@]}")
+              seed=("greengage${v}")
             fi
-            [ ${#pkgs[@]} -gt 0 ] && test_install "greengage${v}" "${pkgs[@]}"
+            [ ${#pkgs[@]} -gt 0 ] && test_install "${seed[@]}" "${pkgs[@]}"
           done
 
           if [ "$generic_needs_gp" = false ]; then
