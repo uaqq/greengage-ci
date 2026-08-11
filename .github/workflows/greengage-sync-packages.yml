@@ -231,15 +231,21 @@ jobs:
             esac
             file="downloaded-packages/$f"
             pkg=$(dpkg-deb -f "$file" Package)
+            depends=$(dpkg-deb -f "$file" Depends)
 
-            if [[ "$pkg" =~ [^0-9]([67])$ ]]; then
-              v="${BASH_REMATCH[1]}"
-              for_gp[$v]="${for_gp[$v]:-} $pkg"
+            has6=false; has7=false
+            [[ "$depends" =~ greengage6([^0-9]|$) ]] && has6=true
+            [[ "$depends" =~ greengage7([^0-9]|$) ]] && has7=true
+
+            if $has6 && $has7; then
+              generic+=("$pkg")
+              generic_needs_gp=true
+            elif $has6; then
+              for_gp[6]="${for_gp[6]:-} $pkg"
+            elif $has7; then
+              for_gp[7]="${for_gp[7]:-} $pkg"
             else
               generic+=("$pkg")
-              if dpkg-deb -f "$file" Depends | grep -qE 'greengage[67]'; then
-                generic_needs_gp=true
-              fi
             fi
           done
 
