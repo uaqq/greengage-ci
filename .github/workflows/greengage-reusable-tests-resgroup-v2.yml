@@ -1,0 +1,87 @@
+# .github/workflows/greengage-reusable-tests-resgroup-v2.yml
+name: Greengage Reusable Resource Group v2 Tests
+
+# Trigger for reusable workflow
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Greengage version (e.g., 6 or 7)'
+        required: true
+        type: string
+      target_os:
+        description: 'Target OS (e.g., ubuntu)'
+        required: true
+        type: string
+      target_os_version:
+        description: 'Target OS version (e.g., 24.04)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      ghcr_token:
+        description: 'GitHub token for GHCR access'
+        required: true
+
+jobs:
+  optimizer:  # Resource group v2 isolation tests (installcheck-resgroup-v2)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        optimizer: ${{ fromJson(inputs.version == '7' && '["postgres", "orca"]' || '["postgres"]') }}
+    permissions:
+      contents: read  # Explicit for default behavior
+      packages: read  # Explicit for GHCR access clarity
+      actions: write  # Required for cache and artifact upload
+    env:
+      LOG_NAME: resgroup_v2_ggdb${{ inputs.version }}_${{ inputs.target_os }}${{ inputs.target_os_version }}_${{ matrix.optimizer }}
+      STATEMENT_MEM: ${{ inputs.version == '7' && '125MB' || '250MB' }}
+
+    steps:
+      - name: Maximize disk space
+        uses: greengagedb/greengage-ci/.github/actions/maximize-disk-space@v19
+
+      - name: Restore & Load SHA image
+        uses: greengagedb/greengage-ci/.github/actions/restore-load-image@v53
+        with:
+          version: ${{ inputs.version }}
+          target_os: ${{ inputs.target_os }}
+          target_os_version: ${{ inputs.target_os_version }}
+          extract_ci: ci
+
+      - name: Run resource group v2 tests (optimizer '${{ matrix.optimizer }}')
+        timeout-minutes: 150
+        env:
+          TEST_OS: ${{ inputs.target_os }}
+          OPTIMIZER: ${{ matrix.optimizer == 'orca' && 'on' || 'off' }}
+          CONTAINER_NAME: ${{ env.LOG_NAME }}
+          LOGS: /mnt/logs
+          DATADIRS: /mnt/gpdemo-datadirs
+          TESTTABLESPACE: /mnt/testtablespace
+        run: |
+          export IMAGE=$RESTORE_LOAD_IMAGE
+          bash ci/scripts/run_resgroup_v2_test.bash
+
+      - name: Collect logs (optimizer '${{ matrix.optimizer }}')
+        if: always()
+        uses: greengagedb/greengage-ci/.github/actions/collect-logs@CI-6228
+        with:
+          log_path_prefix: ${{ env.LOG_NAME }}
+          params: |
+            gpAdminLogs d gpAdminLogs
+            gpdb_src/src/test d results
+            gpdb_src/src/test/isolation2 d resgroup
+            gpdb_src/src/test f regression.diffs
+            gpdb_src/gpAux/gpdemo/datadirs d log
+            gpdb_src/gpAux/gpdemo/datadirs d pg_log
+
+      - name: Upload resgroup v2 ${{ matrix.optimizer }} artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.LOG_NAME }}
+          path: /mnt/logs
+          retention-days: 7
+          if-no-files-found: warn

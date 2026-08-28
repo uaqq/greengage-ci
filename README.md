@@ -21,7 +21,9 @@ The repository provides the following reusable workflows:
 - `tests-behave`: Executes Behave test suites, generates artifacts and report.
 - `tests-orca`: Runs ORCA linter and unit tests, produces test artifacts.
 - `tests-regression`: Performs regression tests with optimizer settings.
-- `tests-resgroup`: Conducts resource groups tests using QEMU VM.
+- `tests-resgroup`: Conducts resource groups (cgroup v1) tests using QEMU VM.
+- `tests-resgroup-v2`: Conducts resource group v2 (cgroup v2) isolation tests
+  directly on the runner (version 7.x only).
 - `tests-jit`: Performs JIT tests with optimizer settings (version 7.x only).
 - `tests-pg_upgrade`: Verifies the 6.x → 7.x `pg_upgrade` path against the
   built target image (Ubuntu only).
@@ -62,18 +64,29 @@ The repository provides the following reusable workflows:
 
 5. **`tests-resgroup`**:
 
-   - Executes resource groups tests using QEMU VM with cloud-init.
+   - Executes resource groups (cgroup v1) tests using QEMU VM with cloud-init.
    - Generates log artifacts.
    - Uses inputs: `version`, `target_os`, `target_os_version`.
 
-6. **`tests-jit`**:
+6. **`tests-resgroup-v2`**:
+
+   - Executes resource group v2 (cgroup v2) isolation tests
+     (`installcheck-resgroup-v2`) via `ci/scripts/run_resgroup_v2_test.bash`.
+   - Runs directly on the `ubuntu-24.04` runner (which already provides
+     cgroup v2), in a privileged container sharing the host cgroup namespace
+     and cgroup v2 filesystem - no QEMU VM.
+   - Uses a matrix strategy for the `orca` / `postgres` optimizers (v7 only).
+   - Generates log artifacts.
+   - Uses inputs: `version`, `target_os`, `target_os_version`.
+
+7. **`tests-jit`**:
 
    - Runs JIT tests with optimizer settings (`orca`, `postgres`).
    - Generates log artifacts stored in a volume.
    - Uses a matrix strategy to test both optimizer settings.
    - Uses inputs: `version`, `target_os`, `target_os_version`.
 
-7. **`tests-pg_upgrade`**:
+8. **`tests-pg_upgrade`**:
 
    - Restores the built target image, builds a combined 6.x/7.x test
      image on top of it, and runs `pg_upgrade` to verify the upgrade
@@ -83,23 +96,23 @@ The repository provides the following reusable workflows:
      matrix consistency with other workflows but not otherwise varied.
    - Uses inputs: `version`, `target_os`, `target_os_version`.
 
-8. **`package`**:
+9. **`package`**:
 
    - Builds Debian packages inside the Docker container.
    - Optionally tests deployment in Docker.
    - Uploads and caches Debian artifacts.
    - Uses inputs: `version`, `target_os`, `target_os_version`.
 
-9. **`upload`**:
+10. **`upload`**:
 
-   - Restores and loads the SHA-tagged image from cache.
-   - Retags based on the event:
-     - For tagged push: Uses git tag (e.g., `6.28.0`).
-     - For branch push: Uses `latest` (GHCR) or `testing` (DockerHub).
-   - Pushes to GHCR and optionally to DockerHub.
-   - Uses inputs: `version`, `target_os`, `target_os_version`.
+    - Restores and loads the SHA-tagged image from cache.
+    - Retags based on the event:
+      - For tagged push: Uses git tag (e.g., `6.28.0`).
+      - For branch push: Uses `latest` (GHCR) or `testing` (DockerHub).
+    - Pushes to GHCR and optionally to DockerHub.
+    - Uses inputs: `version`, `target_os`, `target_os_version`.
 
-10. **`cleanup`** **(WIP — not in use)**:
+11. **`cleanup`** **(WIP — not in use)**:
 
     - Deletes branch-related images from GHCR on branch deletion.
     - Uses crane and GitHub API for tag removal.
@@ -223,10 +236,12 @@ Both versions share these patterns:
   credentials are provided).
 - The `resgroup-tests` workflow uses QEMU VM, requiring significant resources
   (4 CPUs, 8GB memory).
+- The `resgroup-v2-tests` workflow runs directly on the `ubuntu-24.04` runner
+  (cgroup v2, privileged Docker); it does not use a QEMU VM.
 - The `regression-tests` workflow uses custom `sysctl` settings.
 - Ensure the CI directory structure and required scripts are present in the
   repository (e.g., `run_behave_tests.bash`, `run_resgroup_test.bash`,
-  `ic_gpdb.bash`, `unit_tests_gporca.bash`).
+  `run_resgroup_v2_test.bash`, `ic_gpdb.bash`, `unit_tests_gporca.bash`).
 - Artifacts are uploaded with names like
   `<job>_ggdb<version>_<target_os><target_os_version>_<suffix>`.
 - The `cleanup` workflow should be triggered on branch deletion to remove
@@ -250,6 +265,8 @@ directory of this repository:
   [REUSABLE-TESTS-REGRESSION.md](README/REUSABLE-TESTS-REGRESSION.md)
 - Resource group tests:
   [REUSABLE-TESTS-RESGROUP.md](README/REUSABLE-TESTS-RESGROUP.md)
+- Resource group v2 tests:
+  [REUSABLE-TESTS-RESGROUP-V2.md](README/REUSABLE-TESTS-RESGROUP-V2.md)
 - pg_upgrade tests:
   [REUSABLE-TESTS-PG_UPGRADE.md](README/REUSABLE-TESTS-PG_UPGRADE.md)
 - Upload process:
