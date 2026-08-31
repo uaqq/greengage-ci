@@ -30,8 +30,9 @@ env:
       "GreengageDB/pxf",
       "GreengageDB/gpbackup",
       "GreengageDB/gpbackup-s3-plugin",
-      "GreengageDB/madlib",
-      "GreengageDB/diskquota"
+      "uaqq/madlib",
+      "uaqq/diskquota",
+      "uaqq/ggupgrade"
     ]
 
 jobs:
