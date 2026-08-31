@@ -18,7 +18,7 @@ concurrency:
 env:
   PACKAGE_EXTENSIONS: 'deb ddeb'
   RELEASES_LIMIT: 3
-  GREENGAGE_REPO_URL: 'https://storage.yandexcloud.net'
+  GREENGAGE_REPO_URL: 'https://storage.yandexcloud.net/greengage-repo'
   GREENGAGE_VERSIONS_BY_OS: |-
     {
       "ubuntu/22.04": "6 7",
