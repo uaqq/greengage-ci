@@ -86,6 +86,7 @@ jobs:
           docker build $docker_options \
             --build-arg OS_VERSION \
             --build-arg SKIP_UNITTESTS \
+            --build-arg WITH_PRODUCT_NAME=Greenplum \
             --tag ${IMAGE,,}:${{ github.sha }} \
             -f ci/Dockerfile.$TARGET_OS \
             .
