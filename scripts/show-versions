@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Show, for each reusable workflow and composite action, the latest major
+# release tag (vN) in which the file actually changed, i.e. the current
+# effective version of each component, all on one screen.
+set -eo pipefail
+
+git fetch --tags --quiet
+
+mapfile -t tags < <(git tag -l 'v[0-9]*' | grep -E '^v[0-9]+$' | sort -rV)
+
+{
+  find .github/workflows -maxdepth 1 -name '*.yml' -type f
+  find .github/actions   -mindepth 2 -maxdepth 4 -name 'action.yml' -type f
+} | sort | while read -r f; do
+  prev=""; last=""
+  for t in "${tags[@]}"; do
+    if [[ -z "$prev" ]]; then
+      prev=$t
+      continue
+    fi
+    if ! git diff --quiet "$prev" "$t" -- "$f"; then
+      last=$prev
+      break
+    fi
+    prev=$t
+  done
+  printf '%s\t%s\n' "$f" "${last:-<none>}"
+done | column -t -s $'\t'

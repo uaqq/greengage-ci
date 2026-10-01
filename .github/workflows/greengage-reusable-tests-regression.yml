@@ -72,7 +72,7 @@ jobs:
 
       - name: Collect logs optimizer ${{ matrix.optimizer }}
         if: always()
-        uses: greengagedb/greengage-ci/.github/actions/collect-logs@v26
+        uses: greengagedb/greengage-ci/.github/actions/collect-logs@v55
         with:
           log_path_prefix: regression_ggdb${{ inputs.version }}_${{ inputs.target_os }}${{ inputs.target_os_version }}_${{ matrix.optimizer }}
 

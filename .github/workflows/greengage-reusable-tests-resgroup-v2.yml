@@ -1,0 +1,94 @@
+# .github/workflows/greengage-reusable-tests-resgroup-v2.yml
+name: Greengage Reusable Resource Group v2 Tests
+
+# Trigger for reusable workflow
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Greengage version (7.x only)'
+        required: true
+        type: string
+      target_os:
+        description: 'Target OS (e.g., ubuntu)'
+        required: true
+        type: string
+      target_os_version:
+        description: 'Target OS version (e.g., 24.04)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      ghcr_token:
+        description: 'GitHub token for GHCR access'
+        required: true
+
+jobs:
+  optimizer:  # Resource group v2 isolation tests (installcheck-resgroup-v2)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        optimizer: [postgres, orca]
+    permissions:
+      contents: read  # Explicit for default behavior
+      packages: read  # Explicit for GHCR access clarity
+      actions: write  # Required for cache and artifact upload
+    env:
+      LOG_NAME: resgroup_v2_ggdb${{ inputs.version }}_${{ inputs.target_os }}${{ inputs.target_os_version }}_${{ matrix.optimizer }}
+
+    steps:
+      - name: Maximize disk space
+        uses: greengagedb/greengage-ci/.github/actions/maximize-disk-space@v19
+
+      - name: Restore & Load SHA image
+        uses: greengagedb/greengage-ci/.github/actions/restore-load-image@v53
+        with:
+          version: ${{ inputs.version }}
+          target_os: ${{ inputs.target_os }}
+          target_os_version: ${{ inputs.target_os_version }}
+
+      - name: Run resource group v2 tests (optimizer '${{ matrix.optimizer }}')
+        timeout-minutes: 150
+        env:
+          TEST_OS: ${{ inputs.target_os }}
+          OPTIMIZER: ${{ matrix.optimizer == 'orca' && 'on' || 'off' }}
+          STATEMENT_MEM: 125MB
+        run: |
+          docker run -i \
+            -e TEST_OS \
+            -e OPTIMIZER \
+            -e STATEMENT_MEM \
+            --privileged \
+            --cgroupns=host \
+            --sysctl "kernel.sem=500 1024000 200 4096" \
+            -v /logs:/logs \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v /mnt/gpdemo-datadirs:/home/gpadmin/gpdb_src/gpAux/gpdemo/datadirs:rw \
+            -v /mnt/testtablespace:/home/gpadmin/gpdb_src/src/test/isolation2/testtablespace:rw \
+            $RESTORE_LOAD_IMAGE /bin/bash <<'EOF'
+          /home/gpadmin/gpdb_src/concourse/scripts/ic_gpdb_resgroup_v2.bash
+          EOF
+
+      - name: Collect logs (optimizer '${{ matrix.optimizer }}')
+        if: always()
+        uses: greengagedb/greengage-ci/.github/actions/collect-logs@v55
+        with:
+          log_path_prefix: ${{ env.LOG_NAME }}
+          params: |
+            gpAdminLogs d gpAdminLogs
+            gpdb_src/src/test d results
+            gpdb_src/src/test/isolation2 d resgroup
+            gpdb_src/src/test f regression.diffs
+            gpdb_src/gpAux/gpdemo/datadirs d log
+            gpdb_src/gpAux/gpdemo/datadirs d pg_log
+
+      - name: Upload resgroup v2 ${{ matrix.optimizer }} artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.LOG_NAME }}
+          path: /logs
+          retention-days: 7
+          if-no-files-found: warn

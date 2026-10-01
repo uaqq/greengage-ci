@@ -19,6 +19,21 @@ on:
         required: false
         type: string
         default: ''
+      test_script:
+        description: 'Optional test script'
+        required: false
+        type: string
+        default: '/home/gpadmin/gpdb_src/ci/scripts/pg_upgrade_run_6X_to_7X_migration.bash'
+      cleanup_script:
+        description: 'Optional cleanup script to run after loading SQL_SCHEMA'
+        required: false
+        type: string
+        default: '/home/gpadmin/gpdb_src/src/bin/pg_upgrade/cleanup_regression_dump_from_6X.sql'
+      dump_options:
+        description: 'Optional pg_dump parameters for pre- and post-upgrade dumps'
+        required: false
+        type: string
+        default: '--data-only --extra-float-digits=-3'
     secrets:
       ghcr_token:
         description: 'GitHub token for GHCR access'
@@ -43,7 +58,17 @@ jobs:
           version: ${{ inputs.version }}
           target_os: ${{ inputs.target_os }}
           target_os_version: ${{ inputs.target_os_version }}
-          extract_ci: ci
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: ci
+
+      - name: Fetch SQL dump
+        id: sql-dump
+        uses: greengagedb/greengage-ci/.github/actions/sql-dump/fetch@v54
+        with:
+          version: 6
 
       - name: Define PG_UPGRADE_IMAGE name from RESTORE_LOAD_IMAGE
         run: echo "PG_UPGRADE_IMAGE=${RESTORE_LOAD_IMAGE/:/_pgupgrade:}" >> $GITHUB_ENV
@@ -58,27 +83,49 @@ jobs:
           build-args: GGDB7_IMAGE=${{ env.RESTORE_LOAD_IMAGE }}
 
       - name: Run pg_upgrade_run_6X_to_7X_migration.bash
+        env:
+          SQL_DUMP: ${{ steps.sql-dump.outputs.sql_dump }}
+          TEST_SCRIPT: ${{ inputs.test_script }}
+          CLEANUP_SCRIPT: ${{ inputs.cleanup_script }}
+          DUMP_OPTIONS: ${{ inputs.dump_options }}
         run: |
-          mkdir -p logs
-          docker run --rm \
-            -v "$(pwd)/logs:/logs" \
-            $PG_UPGRADE_IMAGE bash -c \
-            "gpdb_src/concourse/scripts/setup_gpadmin_user.bash && \
-            su gpadmin /home/gpadmin/gpdb_src/ci/scripts/pg_upgrade_run_6X_to_7X_migration.bash; \
-            test_exit_code=\$?; \
-            cp /home/gpadmin/gpdb_src/src/bin/pg_upgrade/regression.diffs /logs/regression.diffs 2>/dev/null && \
-              echo 'copied regression.diffs' || \
-              echo 'regression.diffs not found (ok if test passed)'; \
-            cp /home/gpadmin/gpdb_src/src/bin/pg_upgrade/partitions_regression.diffs /logs/partitions_regression.diffs 2>/dev/null && \
-              echo 'copied partitions_regression.diffs' || \
-              echo 'partitions_regression.diffs not found (ok if test passed)'; \
-            (exit \$test_exit_code)"
+          docker run -i \
+            -v ./logs:/logs \
+            -v "$(realpath "$SQL_DUMP"):/dump.sql:ro" \
+            -e SQL_SCHEMA=/dump.sql \
+            -e TEST_SCRIPT \
+            -e CLEANUP_SCRIPT \
+            -e DUMP_OPTIONS \
+            $PG_UPGRADE_IMAGE /bin/bash <<'EOF'
+          gpdb_src/concourse/scripts/setup_gpadmin_user.bash && \
+          su gpadmin $TEST_SCRIPT
+          EOF
 
-      - name: Upload pg_upgrade logs
+      - name: Collect logs
+        if: always()
+        uses: greengagedb/greengage-ci/.github/actions/collect-logs@v55
+        with:
+          log_path_prefix: pg_upgrade_ggdb${{ inputs.version }}_${{ inputs.target_os }}${{ inputs.target_os_version }}_logs
+          params: |
+            gpdb_src/src/bin/pg_upgrade/tmp_check/datadirs d log
+            gpdb_src/src/bin/pg_upgrade/tmp_check/datadirs d gpAdminLogs
+            ggdb6_src/gpAux/gpdemo/datadirs d gpAdminLogs
+            gpAdminLogs d gpAdminLogs
+
+      - name: Collect diffs and dumps
+        if: failure()
+        uses: greengagedb/greengage-ci/.github/actions/collect-logs@v55
+        with:
+          log_path_prefix: pg_upgrade_ggdb${{ inputs.version }}_${{ inputs.target_os }}${{ inputs.target_os_version }}_dumps
+          params: |
+            gpdb_src/src/bin/pg_upgrade/tmp_check f dump*.sql
+            gpdb_src/src/bin/pg_upgrade f *.diffs
+
+      - name: Upload pg_upgrade artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: pg_upgrade_ggdb${{ inputs.version }}_${{ inputs.target_os }}${{ inputs.target_os_version }}_diffs
+          name: pg_upgrade_ggdb${{ inputs.version }}_${{ inputs.target_os }}${{ inputs.target_os_version }}
           path: logs
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: warn  # Warning if no artifacts are found

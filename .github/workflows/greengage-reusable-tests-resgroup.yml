@@ -237,7 +237,7 @@ jobs:
 
       - name: Collect logs
         if: always()
-        uses: greengagedb/greengage-ci/.github/actions/collect-logs@v29
+        uses: greengagedb/greengage-ci/.github/actions/collect-logs@v55
         with:
           log_dir: '/logs'
           log_path_prefix: 'ggdb_test'

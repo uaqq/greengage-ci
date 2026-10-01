@@ -145,7 +145,7 @@ jobs:
 
       - name: Collect logs ${{ matrix.feature }}
         if: always()
-        uses: greengagedb/greengage-ci/.github/actions/collect-logs@v26
+        uses: greengagedb/greengage-ci/.github/actions/collect-logs@v55
         with:
           log_path_prefix: "behave_${{ matrix.feature }}"
 

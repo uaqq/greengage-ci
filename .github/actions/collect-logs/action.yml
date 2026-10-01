@@ -9,7 +9,7 @@ inputs:
     default: '/logs'
   log_path_prefix:
     description: 'Prefix for logs directory'
-    default: 'ggdb_test'
+    default: ''
     required: false
   docker_host:
     description: 'Docker host string (e.g., ssh://qemu-vm)'
@@ -19,11 +19,11 @@ inputs:
     description: 'Params for find util'
     required: false
     default: |
-      ./ d gpAdminLogs
-      gpdb_src/src/test/ d results
-      gpdb_src/src/test/ f regression.diffs
-      gpdb_src/gpAux/gpdemo/datadirs/ d log
-      gpdb_src/gpAux/gpdemo/datadirs/ d pg_log
+      gpAdminLogs d gpAdminLogs
+      gpdb_src/src/test f *.diffs
+      gpdb_src/src/test d results
+      gpdb_src/gpAux/gpdemo/datadirs d log
+      gpdb_src/gpAux/gpdemo/datadirs d pg_log
 
 runs:
   using: "composite"
@@ -32,7 +32,7 @@ runs:
       shell: bash
       env:
         LOG_DIR: ${{ inputs.log_dir }}
-        LOG_PATH_PREFIX: ${{ inputs.log_path_prefix }}
+        LOG_PATH_PREFIX: ${{ inputs.log_path_prefix || github.job }}
         PARAMS: ${{ inputs.params }}
         DOCKER_HOST: ${{ inputs.docker_host }}
       run: |
@@ -41,36 +41,30 @@ runs:
         containers=$(docker ps -a --format '{{.Names}}')
 
         for container in $containers; do
-          echo "Collect logs from $container"
+          echo "Collect logs from '$container'"
 
           docker start "$container" >/dev/null 2>&1 || true
 
-          if ! docker exec \
+          if ! docker exec -i \
             -e LOG_DIR \
             -e LOG_PATH_PREFIX \
             -e PARAMS \
             "$container" \
-            bash -c '
-
+            /bin/bash <<'EOF'
               mkdir -p "$LOG_DIR"
-              cd /home/gpadmin/
-
-              echo "Container: $(hostname)"
-              echo "PWD: $(pwd)"
-              echo "LOG_DIR: $LOG_DIR"
-              ls -la /home/gpadmin
-
               while IFS= read -r param; do
                 read -r path type name <<< "$param"
-                if [ -e "$path" ]; then
-                  find "$path" -name "$name" -type "$type" \
-                    -exec tar -rf "${LOG_DIR}/${LOG_PATH_PREFIX}_${name}.tar" "{}" \;
+                src=$(sed -E 's|^([^/])|\'"$PWD"'/\1|;s|/+|/|g' <<< $path)
+                if [ -d "$src" ]; then
+                  echo "Searching '$name' in $src"
+                  safe_suffix=$(tr -d $'"\\:<>|*?\r\n' <<< "$name" | sed -E 's/\.+/./g;s/^\.//;s/\.$//')
+                  find "$src" -name "$name" -type "$type" -print \
+                    -exec tar -rf "${LOG_DIR}/${LOG_PATH_PREFIX}_${safe_suffix}.tar" "{}" +
                 fi
               done <<< "$PARAMS"
-
-              chmod -R a+rwX "$LOG_DIR" 2>/dev/null || true
-            '
+              chmod -R a+rwX "$LOG_DIR" 2>/dev/null && ls -lah "$LOG_DIR"
+        EOF
           then
-            echo 'Failed to collect logs from $container'
+            echo "Failed to collect logs from '$container'"
           fi
         done
