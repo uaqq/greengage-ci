@@ -29,7 +29,7 @@ env:
       "GreengageDB/greengage",
       "GreengageDB/pxf",
       "GreengageDB/gpbackup",
-      "GreengageDB/gpbackup-s3-plugin",
+      "uaqq/gpbackup-s3-plugin",
       "uaqq/madlib",
       "uaqq/diskquota",
       "uaqq/ggupgrade"
